@@ -81,6 +81,11 @@ if(LLVM_VERSION_MAJOR GREATER 5)
 else()
   set(maybe_PRIVATE "")
 endif()
+target_compile_options(castxml PRIVATE
+  $<$<CONFIG:Debug>:
+    -ggdb;-O0
+  >
+)
 target_link_libraries(castxml ${maybe_PRIVATE} ${clang_libs})
 
 set_property(SOURCE Utils.cxx APPEND PROPERTY COMPILE_DEFINITIONS
