@@ -1262,7 +1262,18 @@ void ASTVisitor::PrintMangledAttribute(clang::NamedDecl const* d)
 {
   // Compute the mangled name.
   std::string s;
-  {
+
+  bool isCUDAGlobal = false;
+  // check if `d` is a CUDA kernel
+  if (auto *fd = clang::dyn_cast<clang::FunctionDecl>(d)) {
+    isCUDAGlobal = fd->hasAttr<clang::CUDAGlobalAttr>();
+  }
+  if (isCUDAGlobal) {
+    clang::GlobalDecl gd(clang::dyn_cast<clang::FunctionDecl>(d),
+                         clang::KernelReferenceKind::Kernel);
+    llvm::raw_string_ostream rso(s);
+    this->MangleContext->mangleName(gd, rso);
+  } else {
     llvm::raw_string_ostream rso(s);
     this->MangleContext->mangleName(d, rso);
   }
@@ -1569,6 +1580,19 @@ void ASTVisitor::GetDeclAttributes(clang::Decl const* d,
 
   if (d->hasAttr<clang::OverrideAttr>()) {
     attrs.push_back("override");
+  }
+
+  // CUDA attributes
+  if (d->hasAttr<clang::CUDAGlobalAttr>()) {
+    attrs.push_back("__global__");
+  }
+
+  if (d->hasAttr<clang::CUDADeviceAttr>()) {
+    attrs.push_back("__device__");
+  }
+
+  if (d->hasAttr<clang::CUDAHostAttr>()) {
+    attrs.push_back("__host__");
   }
 }
 
