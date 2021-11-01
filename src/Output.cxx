@@ -541,6 +541,8 @@ class ASTVisitor : public ASTVisitorBase
   void OutputFieldDecl(clang::FieldDecl const* d, DumpNode const* dn);
   void OutputVarDecl(clang::VarDecl const* d, DumpNode const* dn);
 
+  void OutputFunctionTemplateDecl(clang::FunctionTemplateDecl const* d,
+                                  DumpNode const* dn);
   void OutputFunctionDecl(clang::FunctionDecl const* d, DumpNode const* dn);
   void OutputCXXMethodDecl(clang::CXXMethodDecl const* d, DumpNode const* dn);
   void OutputCXXConversionDecl(clang::CXXConversionDecl const* d,
@@ -914,6 +916,13 @@ void ASTVisitor::AddClassTemplateDecl(clang::ClassTemplateDecl const* d,
 void ASTVisitor::AddFunctionTemplateDecl(clang::FunctionTemplateDecl const* d,
                                          std::set<DumpId>* emitted)
 {
+  // Queue the function template (if it has an identifier)
+  if (clang::IdentifierInfo const* ii = d->getIdentifier()) {
+    DumpId id = this->AddDeclDumpNode(d, true);
+    if (id && emitted) {
+      emitted->insert(id);
+    }
+  }
   // Queue all the instantiations of this function template.
   for (clang::FunctionTemplateDecl::spec_iterator i = d->spec_begin(),
                                                   e = d->spec_end();
@@ -2110,6 +2119,21 @@ void ASTVisitor::OutputVarDecl(clang::VarDecl const* d, DumpNode const* dn)
   this->PrintCommentAttribute(d, dn);
 
   this->OS << "/>\n";
+}
+
+void ASTVisitor::OutputFunctionTemplateDecl(clang::FunctionTemplateDecl const* d,
+                                            DumpNode const* dn) {
+  clang::FunctionDecl* df = d->getTemplatedDecl();
+  unsigned int flags = FH_Returns;
+  if (df->getStorageClass() == clang::SC_Static) {
+    flags |= FH_Static;
+  }
+  // we should have an identifier here, otherwise this should not have been
+  // added to queue
+  if (clang::IdentifierInfo const* ii = d->getIdentifier()) {
+    this->OutputFunctionHelper(
+      df, dn, "FunctionTemplate", flags, ii->getName().str());
+  }
 }
 
 void ASTVisitor::OutputFunctionDecl(clang::FunctionDecl const* d,
