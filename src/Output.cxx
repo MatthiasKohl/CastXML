@@ -511,6 +511,10 @@ class ASTVisitor : public ASTVisitorBase
   void OutputFunctionArgument(clang::ParmVarDecl const* a, bool complete,
                               clang::Expr const* def);
 
+  /** Output a <TemplateParameter/> element inside a function element.  */
+  void OutputFunctionTemplateParameter(clang::NamedDecl const* d,
+                                       bool complete);
+
   /** Print some statements (expressions) in a custom form.  */
   bool PrintHelpStmt(clang::Stmt const* s, llvm::raw_ostream& os);
 
@@ -537,6 +541,10 @@ class ASTVisitor : public ASTVisitorBase
     clang::ClassTemplateSpecializationDecl const* d, DumpNode const* dn);
   void OutputTypedefDecl(clang::TypedefDecl const* d, DumpNode const* dn);
   void OutputTypeAliasDecl(clang::TypeAliasDecl const* d, DumpNode const* dn);
+  void OutputTemplateTemplateParmDecl(clang::TemplateTemplateParmDecl const* d,
+                                      DumpNode const* dn);
+  void OutputTemplateTypeParmDecl(clang::TemplateTypeParmDecl const* d,
+                                  DumpNode const* dn);
   void OutputEnumDecl(clang::EnumDecl const* d, DumpNode const* dn);
   void OutputFieldDecl(clang::FieldDecl const* d, DumpNode const* dn);
   void OutputVarDecl(clang::VarDecl const* d, DumpNode const* dn);
@@ -809,6 +817,11 @@ ASTVisitor::DumpId ASTVisitor::AddTypeDumpNode(DumpType dt, bool complete,
                                      dq);
       }
     } break;
+    case clang::Type::TemplateTypeParm: {
+      clang::TemplateTypeParmType const* tpt =
+        t->getAs<clang::TemplateTypeParmType>();
+      // TODO
+    } break;
     case clang::Type::Typedef: {
       clang::TypedefType const* tdt = t->getAs<clang::TypedefType>();
       if (!tdt->isInstantiationDependentType() && tdt->isSugared()) {
@@ -921,6 +934,23 @@ void ASTVisitor::AddFunctionTemplateDecl(clang::FunctionTemplateDecl const* d,
     DumpId id = this->AddDeclDumpNode(d, true);
     if (id && emitted) {
       emitted->insert(id);
+    }
+    // also queue the template parameter type declarations
+    clang::TemplateParameterList const* tpl = d->getTemplateParameters();
+    for (clang::TemplateParameterList::const_iterator i =
+          tpl->begin(), e = tpl->end(); i != e; ++i) {
+      if (clang::TemplateTypeParmDecl const* d_type =
+            clang::dyn_cast<clang::TemplateTypeParmDecl>(*i)) {
+        DumpId id = this->AddDeclDumpNode(d_type, true);
+        if (id && emitted)
+          emitted->insert(id);
+      }
+      if (clang::TemplateTemplateParmDecl const* d_template_type =
+            clang::dyn_cast<clang::TemplateTemplateParmDecl>(d)) {
+        DumpId id = this->AddDeclDumpNode(d_template_type, true);
+        if (id && emitted)
+          emitted->insert(id);
+      }
     }
   }
   // Queue all the instantiations of this function template.
@@ -1756,8 +1786,24 @@ void ASTVisitor::OutputFunctionHelper(clang::FunctionDecl const* d,
   this->PrintAttributesAttribute(attributes);
   this->PrintCommentAttribute(d, dn);
 
+  bool has_template_parameters = false;
+
+  // template parameters
+  if (clang::FunctionTemplateDecl const* ftd =
+        d->getDescribedFunctionTemplate()) {
+    clang::TemplateParameterList const* tpl = ftd->getTemplateParameters();
+    has_template_parameters = tpl->size() > 0;
+    if (has_template_parameters)
+      this->OS << ">\n";
+    for (clang::TemplateParameterList::const_iterator i =
+           tpl->begin(), e = tpl->end(); i != e; ++i) {
+      this->OutputFunctionTemplateParameter(*i, dn->Complete);
+    }
+  }
+
   if (unsigned np = d->getNumParams()) {
-    this->OS << ">\n";
+    if (!has_template_parameters)
+      this->OS << ">\n";
     for (unsigned i = 0; i < np; ++i) {
       // Use the default argument from the most recent declaration.
       // Clang accumulates the defaults and only the last one has
@@ -1774,6 +1820,8 @@ void ASTVisitor::OutputFunctionHelper(clang::FunctionDecl const* d,
     if (d->isVariadic()) {
       this->OS << "    <Ellipsis/>\n";
     }
+    this->OS << "  </" << tag << ">\n";
+  } else if (has_template_parameters) {
     this->OS << "  </" << tag << ">\n";
   } else {
     this->OS << "/>\n";
@@ -1848,6 +1896,37 @@ void ASTVisitor::OutputFunctionArgument(clang::ParmVarDecl const* a,
     this->OS << "\"";
   }
   this->PrintAttributesAttribute(a);
+  this->OS << "/>\n";
+}
+
+void ASTVisitor::OutputFunctionTemplateParameter(clang::NamedDecl const* d,
+                                                 bool complete)
+{
+  if (!d->isTemplateParameter()) return;
+  this->OS << "    <TemplateParameter";
+  // we only handle type param, non-type param and template param here
+  // no parameter packs or other kinds of template parameters
+  if (clang::NonTypeTemplateParmDecl const* d_non_type =
+        clang::dyn_cast<clang::NonTypeTemplateParmDecl>(d)) {
+    if (d_non_type->isParameterPack()) {
+      this->OS << "/>\n";
+      return;
+    }
+    this->PrintTypeAttribute(d_non_type->getType(), complete);
+  }
+  if (clang::TemplateTypeParmDecl const* d_type =
+        clang::dyn_cast<clang::TemplateTypeParmDecl>(d)) {
+    this->OS << " template_type=\"1\"";
+  }
+  if (clang::TemplateTemplateParmDecl const* d_template_type =
+        clang::dyn_cast<clang::TemplateTemplateParmDecl>(d)) {
+    this->OS << " template_type=\"1\" template_template=\"1\"";
+  }
+  std::string name = d->getName().str();
+  if (!name.empty()) {
+    this->PrintNameAttribute(name);
+  }
+  this->PrintLocationAttribute(d);
   this->OS << "/>\n";
 }
 
@@ -2025,6 +2104,23 @@ void ASTVisitor::OutputTypeAliasDecl(clang::TypeAliasDecl const* d,
   this->PrintLocationAttribute(d);
   this->PrintAttributesAttribute(d);
   this->PrintCommentAttribute(d, dn);
+  this->OS << "/>\n";
+}
+
+void ASTVisitor::OutputTemplateTemplateParmDecl(
+    clang::TemplateTemplateParmDecl const* d, DumpNode const* dn) {
+  this->OS << "  <TemplateTemplateParm";
+  this->PrintIdAttribute(dn);
+  this->PrintNameAttribute(d->getName().str());
+  ///@todo print underlying template types
+  this->OS << "/>\n";
+}
+
+void ASTVisitor::OutputTemplateTypeParmDecl(
+    clang::TemplateTypeParmDecl const* d, DumpNode const* dn) {
+  this->OS << "  <TemplateTypeParm";
+  this->PrintIdAttribute(dn);
+  this->PrintNameAttribute(d->getName().str());
   this->OS << "/>\n";
 }
 
