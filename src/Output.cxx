@@ -43,9 +43,11 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <queue>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 class ASTVisitorBase
@@ -511,6 +513,10 @@ class ASTVisitor : public ASTVisitorBase
   void OutputFunctionArgument(clang::ParmVarDecl const* a, bool complete,
                               clang::Expr const* def);
 
+  /** Output a <TemplateParameter/> element inside a function element.  */
+  void OutputFunctionTemplateParameter(clang::NamedDecl const* d,
+                                       bool complete, unsigned idx);
+
   /** Print some statements (expressions) in a custom form.  */
   bool PrintHelpStmt(clang::Stmt const* s, llvm::raw_ostream& os);
 
@@ -537,10 +543,16 @@ class ASTVisitor : public ASTVisitorBase
     clang::ClassTemplateSpecializationDecl const* d, DumpNode const* dn);
   void OutputTypedefDecl(clang::TypedefDecl const* d, DumpNode const* dn);
   void OutputTypeAliasDecl(clang::TypeAliasDecl const* d, DumpNode const* dn);
+  void OutputTemplateTemplateParmDecl(clang::TemplateTemplateParmDecl const* d,
+                                      DumpNode const* dn);
+  void OutputTemplateTypeParmDecl(clang::TemplateTypeParmDecl const* d,
+                                  DumpNode const* dn);
   void OutputEnumDecl(clang::EnumDecl const* d, DumpNode const* dn);
   void OutputFieldDecl(clang::FieldDecl const* d, DumpNode const* dn);
   void OutputVarDecl(clang::VarDecl const* d, DumpNode const* dn);
 
+  void OutputFunctionTemplateDecl(clang::FunctionTemplateDecl const* d,
+                                  DumpNode const* dn);
   void OutputFunctionDecl(clang::FunctionDecl const* d, DumpNode const* dn);
   void OutputCXXMethodDecl(clang::CXXMethodDecl const* d, DumpNode const* dn);
   void OutputCXXConversionDecl(clang::CXXConversionDecl const* d,
@@ -569,6 +581,8 @@ class ASTVisitor : public ASTVisitorBase
   void OutputPointerType(clang::PointerType const* t, DumpNode const* dn);
   void OutputElaboratedType(clang::ElaboratedType const* t,
                             DumpNode const* dn);
+  void OutputTemplateTypeParmType(clang::TemplateTypeParmType const* t,
+                                  DumpNode const* dn);
 
   /** Queue declarations matching given qualified name in given context.  */
   void LookupStart(clang::DeclContext const* dc, std::string const& name);
@@ -622,6 +636,10 @@ private:
 
   // File traversal queue.
   std::queue<clang::FileEntry const*> FileQueue;
+
+  // Names of template parameters by index
+  typedef std::map<unsigned, std::string> TemplateParameterNameMap;
+  TemplateParameterNameMap TemplateNames;
 
 public:
   ASTVisitor(clang::CompilerInstance& ci, clang::ASTContext& ctx,
@@ -914,6 +932,30 @@ void ASTVisitor::AddClassTemplateDecl(clang::ClassTemplateDecl const* d,
 void ASTVisitor::AddFunctionTemplateDecl(clang::FunctionTemplateDecl const* d,
                                          std::set<DumpId>* emitted)
 {
+  // Queue the function template (if it has an identifier)
+  if (clang::IdentifierInfo const* ii = d->getIdentifier()) {
+    DumpId id = this->AddDeclDumpNode(d, true);
+    if (id && emitted) {
+      emitted->insert(id);
+    }
+    // also queue the template parameter type declarations
+    clang::TemplateParameterList const* tpl = d->getTemplateParameters();
+    for (clang::TemplateParameterList::const_iterator i =
+          tpl->begin(), e = tpl->end(); i != e; ++i) {
+      if (clang::TemplateTypeParmDecl const* d_type =
+            clang::dyn_cast<clang::TemplateTypeParmDecl>(*i)) {
+        DumpId id = this->AddDeclDumpNode(d_type, true);
+        if (id && emitted)
+          emitted->insert(id);
+      }
+      if (clang::TemplateTemplateParmDecl const* d_template_type =
+            clang::dyn_cast<clang::TemplateTemplateParmDecl>(d)) {
+        DumpId id = this->AddDeclDumpNode(d_template_type, true);
+        if (id && emitted)
+          emitted->insert(id);
+      }
+    }
+  }
   // Queue all the instantiations of this function template.
   for (clang::FunctionTemplateDecl::spec_iterator i = d->spec_begin(),
                                                   e = d->spec_end();
@@ -1262,7 +1304,18 @@ void ASTVisitor::PrintMangledAttribute(clang::NamedDecl const* d)
 {
   // Compute the mangled name.
   std::string s;
-  {
+
+  bool isCUDAGlobal = false;
+  // check if `d` is a CUDA kernel
+  if (auto *fd = clang::dyn_cast<clang::FunctionDecl>(d)) {
+    isCUDAGlobal = fd->hasAttr<clang::CUDAGlobalAttr>();
+  }
+  if (isCUDAGlobal) {
+    clang::GlobalDecl gd(clang::dyn_cast<clang::FunctionDecl>(d),
+                         clang::KernelReferenceKind::Kernel);
+    llvm::raw_string_ostream rso(s);
+    this->MangleContext->mangleName(gd, rso);
+  } else {
     llvm::raw_string_ostream rso(s);
     this->MangleContext->mangleName(d, rso);
   }
@@ -1570,6 +1623,19 @@ void ASTVisitor::GetDeclAttributes(clang::Decl const* d,
   if (d->hasAttr<clang::OverrideAttr>()) {
     attrs.push_back("override");
   }
+
+  // CUDA attributes
+  if (d->hasAttr<clang::CUDAGlobalAttr>()) {
+    attrs.push_back("__global__");
+  }
+
+  if (d->hasAttr<clang::CUDADeviceAttr>()) {
+    attrs.push_back("__device__");
+  }
+
+  if (d->hasAttr<clang::CUDAHostAttr>()) {
+    attrs.push_back("__host__");
+  }
 }
 
 void ASTVisitor::PrintThrowsAttribute(clang::FunctionProtoType const* fpt,
@@ -1723,8 +1789,23 @@ void ASTVisitor::OutputFunctionHelper(clang::FunctionDecl const* d,
   this->PrintAttributesAttribute(attributes);
   this->PrintCommentAttribute(d, dn);
 
+  bool has_template_parameters = false;
+
+  // template parameters
+  if (clang::FunctionTemplateDecl const* ftd =
+        d->getDescribedFunctionTemplate()) {
+    clang::TemplateParameterList const* tpl = ftd->getTemplateParameters();
+    has_template_parameters = tpl->size() > 0;
+    if (has_template_parameters)
+      this->OS << ">\n";
+    for (unsigned i = 0; i < tpl->size(); ++i) {
+      this->OutputFunctionTemplateParameter(tpl->getParam(i), dn->Complete, i);
+    }
+  }
+
   if (unsigned np = d->getNumParams()) {
-    this->OS << ">\n";
+    if (!has_template_parameters)
+      this->OS << ">\n";
     for (unsigned i = 0; i < np; ++i) {
       // Use the default argument from the most recent declaration.
       // Clang accumulates the defaults and only the last one has
@@ -1741,6 +1822,8 @@ void ASTVisitor::OutputFunctionHelper(clang::FunctionDecl const* d,
     if (d->isVariadic()) {
       this->OS << "    <Ellipsis/>\n";
     }
+    this->OS << "  </" << tag << ">\n";
+  } else if (has_template_parameters) {
     this->OS << "  </" << tag << ">\n";
   } else {
     this->OS << "/>\n";
@@ -1815,6 +1898,40 @@ void ASTVisitor::OutputFunctionArgument(clang::ParmVarDecl const* a,
     this->OS << "\"";
   }
   this->PrintAttributesAttribute(a);
+  this->OS << "/>\n";
+}
+
+void ASTVisitor::OutputFunctionTemplateParameter(clang::NamedDecl const* d,
+                                                 bool complete, unsigned idx)
+{
+  if (!d->isTemplateParameter()) return;
+  this->OS << "    <TemplateParameter";
+  // we only handle type param, non-type param and template param here
+  // no parameter packs or other kinds of template parameters
+  if (clang::NonTypeTemplateParmDecl const* d_non_type =
+        clang::dyn_cast<clang::NonTypeTemplateParmDecl>(d)) {
+    if (d_non_type->isParameterPack()) {
+      this->OS << "/>\n";
+      return;
+    }
+    this->PrintTypeAttribute(d_non_type->getType(), complete);
+  } else {
+    this->OS << " template_type=\"1\"";
+    if (clang::TemplateTemplateParmDecl const* d_template_type =
+          clang::dyn_cast<clang::TemplateTemplateParmDecl>(d)) {
+      this->OS << " template_template=\"1\"";
+    } else {
+      clang::TemplateTypeParmDecl const* d_type =
+        clang::dyn_cast<clang::TemplateTypeParmDecl>(d);
+      this->PrintTypeAttribute(
+        clang::QualType(d_type->getTypeForDecl(), 0), complete);
+    }
+  }
+  std::string name = this->TemplateNames[idx];
+  if (!name.empty()) {
+    this->PrintNameAttribute(name);
+  }
+  this->PrintLocationAttribute(d);
   this->OS << "/>\n";
 }
 
@@ -1995,6 +2112,23 @@ void ASTVisitor::OutputTypeAliasDecl(clang::TypeAliasDecl const* d,
   this->OS << "/>\n";
 }
 
+void ASTVisitor::OutputTemplateTemplateParmDecl(
+    clang::TemplateTemplateParmDecl const* d, DumpNode const* dn) {
+  this->OS << "  <TemplateTemplateParm";
+  this->PrintIdAttribute(dn);
+  this->PrintNameAttribute(d->getName().str());
+  ///@todo print underlying template types
+  this->OS << "/>\n";
+}
+
+void ASTVisitor::OutputTemplateTypeParmDecl(
+    clang::TemplateTypeParmDecl const* d, DumpNode const* dn) {
+  this->OS << "  <TemplateTypeParm";
+  this->PrintIdAttribute(dn);
+  this->PrintNameAttribute(d->getName().str());
+  this->OS << "/>\n";
+}
+
 void ASTVisitor::OutputEnumDecl(clang::EnumDecl const* d, DumpNode const* dn)
 {
   this->OS << "  <Enumeration";
@@ -2086,6 +2220,28 @@ void ASTVisitor::OutputVarDecl(clang::VarDecl const* d, DumpNode const* dn)
   this->PrintCommentAttribute(d, dn);
 
   this->OS << "/>\n";
+}
+
+void ASTVisitor::OutputFunctionTemplateDecl(clang::FunctionTemplateDecl const* d,
+                                            DumpNode const* dn) {
+  clang::FunctionDecl* df = d->getTemplatedDecl();
+  unsigned int flags = FH_Returns;
+  if (df->getStorageClass() == clang::SC_Static) {
+    flags |= FH_Static;
+  }
+  // we should have an identifier here, otherwise this should not have been
+  // added to queue
+  if (clang::IdentifierInfo const* ii = d->getIdentifier()) {
+    std::string name = ii->getName().str();
+    // add names of all template parameters, since they would be lost through
+    // the templated decl otherwise
+    clang::TemplateParameterList const* tpl = d->getTemplateParameters();
+    for (unsigned i = 0; i < tpl->size(); ++i)
+      this->TemplateNames[i] = tpl->getParam(i)->getName().str();
+    this->OutputFunctionHelper(df, dn, "FunctionTemplate", flags, name);
+  }
+  // clear the map of names again for any future function template
+  this->TemplateNames.clear();
 }
 
 void ASTVisitor::OutputFunctionDecl(clang::FunctionDecl const* d,
@@ -2239,7 +2395,9 @@ void ASTVisitor::OutputBuiltinType(clang::BuiltinType const* t,
       break;
   };
   this->PrintNameAttribute(name);
-  this->PrintABIAttributes(this->CTX.getTypeInfo(t));
+  if (!t->isIncompleteType() && !t->isDependentType()) {
+    this->PrintABIAttributes(this->CTX.getTypeInfo(t));
+  }
 
   this->OS << "/>\n";
 }
@@ -2327,6 +2485,14 @@ void ASTVisitor::OutputElaboratedType(clang::ElaboratedType const* t,
   this->OS << "  <ElaboratedType";
   this->PrintIdAttribute(dn);
   this->PrintTypeAttribute(t->getNamedType(), false);
+  this->OS << "/>\n";
+}
+
+void ASTVisitor::OutputTemplateTypeParmType(
+    clang::TemplateTypeParmType const* t, DumpNode const* dn)
+{
+  this->OS << "  <TemplateParameterType";
+  this->PrintIdAttribute(dn);
   this->OS << "/>\n";
 }
 

@@ -628,7 +628,9 @@ static int runClangImpl(const char* const* argBeg, const char* const* argEnd,
   }
 
   // Reject '-o' with multiple inputs.
-  if (!opts.OutputFile.empty() && c->getJobs().size() > 1) {
+  auto in_files = c->getInputArgs().getAllArgValues(
+    clang::driver::options::OPT_INPUT);
+  if (!opts.OutputFile.empty() && in_files.size() > 1) {
     diags->Report(clang::diag::err_drv_output_argument_with_multiple_files);
     return 1;
   }
