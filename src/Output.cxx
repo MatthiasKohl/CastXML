@@ -2395,7 +2395,9 @@ void ASTVisitor::OutputBuiltinType(clang::BuiltinType const* t,
       break;
   };
   this->PrintNameAttribute(name);
-  this->PrintABIAttributes(this->CTX.getTypeInfo(t));
+  if (!t->isIncompleteType() && !t->isDependentType()) {
+    this->PrintABIAttributes(this->CTX.getTypeInfo(t));
+  }
 
   this->OS << "/>\n";
 }
